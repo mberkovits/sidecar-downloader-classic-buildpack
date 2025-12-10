@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# bin/detect <build-dir>
+
+BUILD_DIR=$1
+CONFIG_FILE="$BUILD_DIR/.buildpack-config"
+
+if [ -f "$CONFIG_FILE" ]; then
+  echo "GitHub JAR Downloader"
+  exit 0
+else
+  exit 1
+fi
+

@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# bin/compile <build-dir> <cache-dir> <env-dir>
+
+set -e
+
+BUILD_DIR=$1
+CACHE_DIR=$2
+ENV_DIR=$3
+
+CONFIG_FILE="$BUILD_DIR/.buildpack-config"
+VENDOR_DIR="$BUILD_DIR/vendor"
+JAR_DIR="$VENDOR_DIR/jars"
+
+indent() {
+  sed -u 's/^/       /'
+}
+
+echo "-----> GitHub JAR Downloader Buildpack"
+
+# Check if config file exists
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "ERROR: .buildpack-config file not found!" | indent
+  exit 1
+fi
+
+# Parse configuration
+echo "-----> Reading configuration from .buildpack-config"
+source "$CONFIG_FILE"
+
+# Validate required configuration
+if [ -z "$GITHUB_REPO_OWNER" ] || [ -z "$GITHUB_REPO_NAME" ]; then
+  echo "ERROR: GITHUB_REPO_OWNER and GITHUB_REPO_NAME must be set in .buildpack-config" | indent
+  exit 1
+fi
+
+if [ -z "$JAR_FILENAME" ]; then
+  echo "ERROR: JAR_FILENAME must be set in .buildpack-config" | indent
+  exit 1
+fi
+
+# Set default release tag to 'latest' if not specified
+RELEASE_TAG=${RELEASE_TAG:-"latest"}
+
+echo "Repository: $GITHUB_REPO_OWNER/$GITHUB_REPO_NAME" | indent
+echo "Release Tag: $RELEASE_TAG" | indent
+echo "JAR Filename: $JAR_FILENAME" | indent
+
+# Create vendor directory
+mkdir -p "$JAR_DIR"
+
+# Determine download URL
+if [ "$RELEASE_TAG" == "latest" ]; then
+  echo "-----> Fetching latest release information"
+  API_URL="https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/latest"
+  
+  # Get release info
+  RELEASE_INFO=$(curl -s "$API_URL")
+  
+  # Extract download URL for the JAR file
+  DOWNLOAD_URL=$(echo "$RELEASE_INFO" | grep -o "https://github.com/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/download/[^\"]*/$JAR_FILENAME" | head -n 1)
+  
+  if [ -z "$DOWNLOAD_URL" ]; then
+    echo "ERROR: Could not find JAR file '$JAR_FILENAME' in latest release" | indent
+    echo "Available assets:" | indent
+    echo "$RELEASE_INFO" | grep "browser_download_url" | indent
+    exit 1
+  fi
+  
+  ACTUAL_TAG=$(echo "$RELEASE_INFO" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
+  echo "Latest release tag: $ACTUAL_TAG" | indent
+else
+  DOWNLOAD_URL="https://github.com/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/download/$RELEASE_TAG/$JAR_FILENAME"
+fi
+
+echo "Download URL: $DOWNLOAD_URL" | indent
+
+# Check cache
+CACHE_FILE="$CACHE_DIR/$JAR_FILENAME"
+CACHE_TAG_FILE="$CACHE_DIR/release_tag"
+
+if [ -f "$CACHE_FILE" ] && [ -f "$CACHE_TAG_FILE" ]; then
+  CACHED_TAG=$(cat "$CACHE_TAG_FILE")
+  if [ "$RELEASE_TAG" == "latest" ]; then
+    COMPARE_TAG="$ACTUAL_TAG"
+  else
+    COMPARE_TAG="$RELEASE_TAG"
+  fi
+  
+  if [ "$CACHED_TAG" == "$COMPARE_TAG" ]; then
+    echo "-----> Using cached JAR file" | indent
+    cp "$CACHE_FILE" "$JAR_DIR/$JAR_FILENAME"
+    echo "Copied from cache" | indent
+  else
+    echo "-----> Cache invalidated (tag changed: $CACHED_TAG -> $COMPARE_TAG)" | indent
+    DOWNLOAD_JAR=true
+  fi
+else
+  DOWNLOAD_JAR=true
+fi
+
+# Download JAR if needed
+if [ "$DOWNLOAD_JAR" == "true" ]; then
+  echo "-----> Downloading JAR file"
+  
+  if curl -L -f -o "$JAR_DIR/$JAR_FILENAME" "$DOWNLOAD_URL"; then
+    echo "Downloaded successfully" | indent
+    
+    # Update cache
+    mkdir -p "$CACHE_DIR"
+    cp "$JAR_DIR/$JAR_FILENAME" "$CACHE_FILE"
+    if [ "$RELEASE_TAG" == "latest" ]; then
+      echo "$ACTUAL_TAG" > "$CACHE_TAG_FILE"
+    else
+      echo "$RELEASE_TAG" > "$CACHE_TAG_FILE"
+    fi
+    echo "Cached for future builds" | indent
+  else
+    echo "ERROR: Failed to download JAR file from $DOWNLOAD_URL" | indent
+    exit 1
+  fi
+fi
+
+# Verify the JAR file
+if [ -f "$JAR_DIR/$JAR_FILENAME" ]; then
+  JAR_SIZE=$(du -h "$JAR_DIR/$JAR_FILENAME" | cut -f1)
+  echo "-----> JAR file ready: $JAR_FILENAME ($JAR_SIZE)" | indent
+else
+  echo "ERROR: JAR file not found after download" | indent
+  exit 1
+fi
+
+# Create profile.d script to add JAR to classpath
+PROFILE_DIR="$BUILD_DIR/.profile.d"
+mkdir -p "$PROFILE_DIR"
+
+cat > "$PROFILE_DIR/github-jar-loader.sh" <<'EOF'
+# Add downloaded JAR to classpath
+export CLASSPATH="$HOME/vendor/jars/*:$CLASSPATH"
+EOF
+
+echo "-----> JAR will be available in classpath at runtime" | indent
+echo "Location: \$HOME/vendor/jars/$JAR_FILENAME" | indent
+
+echo "-----> Build complete!"
+

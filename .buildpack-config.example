@@ -1,0 +1,16 @@
+# GitHub JAR Downloader Buildpack Configuration
+# Copy this file to your application root as .buildpack-config
+
+# GitHub repository owner (required)
+GITHUB_REPO_OWNER="example-owner"
+
+# GitHub repository name (required)
+GITHUB_REPO_NAME="example-repo"
+
+# JAR filename to download (required)
+JAR_FILENAME="my-library.jar"
+
+# Release tag to download from (optional, defaults to "latest")
+# Use "latest" for the most recent release, or specify a tag like "v1.0.0"
+RELEASE_TAG="latest"
+

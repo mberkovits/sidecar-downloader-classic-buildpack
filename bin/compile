@@ -62,35 +62,89 @@ else
   CURL_AUTH=""
 fi
 
-# Determine download URL
+# Determine download URL and asset ID
 if [ "$RELEASE_TAG" == "latest" ]; then
   echo "-----> Fetching latest release information"
   API_URL="https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/latest"
-  
+
   # Get release info with authentication if available
   if [ -n "$GITHUB_TOKEN" ]; then
     RELEASE_INFO=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$API_URL")
   else
     RELEASE_INFO=$(curl -s "$API_URL")
   fi
-  
-  # Extract download URL for the JAR file
-  DOWNLOAD_URL=$(echo "$RELEASE_INFO" | grep -o "https://github.com/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/download/[^\"]*/$JAR_FILENAME" | head -n 1)
-  
-  if [ -z "$DOWNLOAD_URL" ]; then
-    echo "ERROR: Could not find JAR file '$JAR_FILENAME' in latest release" | indent
-    echo "Available assets:" | indent
-    echo "$RELEASE_INFO" | grep "browser_download_url" | indent
-    exit 1
-  fi
-  
+
   ACTUAL_TAG=$(echo "$RELEASE_INFO" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
   echo "Latest release tag: $ACTUAL_TAG" | indent
 else
-  DOWNLOAD_URL="https://github.com/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/download/$RELEASE_TAG/$JAR_FILENAME"
+  echo "-----> Fetching release information for tag: $RELEASE_TAG"
+  API_URL="https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/tags/$RELEASE_TAG"
+
+  # Get release info with authentication if available
+  if [ -n "$GITHUB_TOKEN" ]; then
+    RELEASE_INFO=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$API_URL")
+  else
+    RELEASE_INFO=$(curl -s "$API_URL")
+  fi
+
+  ACTUAL_TAG="$RELEASE_TAG"
 fi
 
-echo "Download URL: $DOWNLOAD_URL" | indent
+# Check if we got valid release info
+if echo "$RELEASE_INFO" | grep -q '"message": "Not Found"'; then
+  echo "ERROR: Release not found. Please check your GITHUB_TOKEN has access to the repository." | indent
+  exit 1
+fi
+
+# Extract asset information for the JAR file
+# Need to find the asset ID which comes before the name in the JSON
+# Use a more robust method to parse the JSON
+
+# First check if the JAR file exists in the release
+if ! echo "$RELEASE_INFO" | grep -q "\"name\": \"$JAR_FILENAME\""; then
+  echo "ERROR: Could not find JAR file '$JAR_FILENAME' in release" | indent
+  echo "Available assets:" | indent
+  echo "$RELEASE_INFO" | grep '"name":' | sed 's/.*"name": "\([^"]*\)".*/\1/' | indent
+  exit 1
+fi
+
+# Extract the asset ID - the id field comes before the name field in each asset object
+# We'll use a more robust approach: find all assets and match by name
+ASSET_ID=$(echo "$RELEASE_INFO" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    assets = data.get('assets', [])
+    for asset in assets:
+        if asset.get('name') == '$JAR_FILENAME':
+            print(asset.get('id', ''))
+            break
+except:
+    pass
+")
+
+# Fallback to grep/sed if python parsing fails
+if [ -z "$ASSET_ID" ]; then
+  echo "Trying alternative parsing method..." | indent
+  # Split on assets, find the one with our filename, extract its ID
+  ASSET_ID=$(echo "$RELEASE_INFO" | awk '
+    /"id":/ { id = $0; gsub(/[^0-9]/, "", id) }
+    /"name": "'"$JAR_FILENAME"'"/ { print id; exit }
+  ')
+fi
+
+if [ -z "$ASSET_ID" ]; then
+  echo "ERROR: Could not extract asset ID for '$JAR_FILENAME'" | indent
+  echo "Available assets:" | indent
+  echo "$RELEASE_INFO" | grep '"name":' | sed 's/.*"name": "\([^"]*\)".*/\1/' | indent
+  exit 1
+fi
+
+# For private repos, we need to use the API endpoint with Accept header
+# For public repos, the direct URL works, but API endpoint works for both
+DOWNLOAD_URL="https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/assets/$ASSET_ID"
+
+echo "Asset ID: $ASSET_ID" | indent
 
 # Check cache
 CACHE_FILE="$CACHE_DIR/$JAR_FILENAME"
@@ -103,7 +157,7 @@ if [ -f "$CACHE_FILE" ] && [ -f "$CACHE_TAG_FILE" ]; then
   else
     COMPARE_TAG="$RELEASE_TAG"
   fi
-  
+
   if [ "$CACHED_TAG" == "$COMPARE_TAG" ]; then
     echo "-----> Using cached JAR file" | indent
     cp "$CACHE_FILE" "$JAR_DIR/$JAR_FILENAME"
@@ -119,17 +173,25 @@ fi
 # Download JAR if needed
 if [ "$DOWNLOAD_JAR" == "true" ]; then
   echo "-----> Downloading JAR file"
-  
-  # Download with authentication if token is available
+
+  # Download using GitHub API (works for both public and private repos)
+  # The Accept header tells GitHub to return the asset binary instead of JSON
   if [ -n "$GITHUB_TOKEN" ]; then
-    DOWNLOAD_CMD="curl -L -f -H \"Authorization: token $GITHUB_TOKEN\" -o \"$JAR_DIR/$JAR_FILENAME\" \"$DOWNLOAD_URL\""
+    curl -L -f \
+      -H "Authorization: token $GITHUB_TOKEN" \
+      -H "Accept: application/octet-stream" \
+      -o "$JAR_DIR/$JAR_FILENAME" \
+      "$DOWNLOAD_URL"
   else
-    DOWNLOAD_CMD="curl -L -f -o \"$JAR_DIR/$JAR_FILENAME\" \"$DOWNLOAD_URL\""
+    curl -L -f \
+      -H "Accept: application/octet-stream" \
+      -o "$JAR_DIR/$JAR_FILENAME" \
+      "$DOWNLOAD_URL"
   fi
-  
-  if eval $DOWNLOAD_CMD; then
+
+  if [ $? -eq 0 ]; then
     echo "Downloaded successfully" | indent
-    
+
     # Update cache
     mkdir -p "$CACHE_DIR"
     cp "$JAR_DIR/$JAR_FILENAME" "$CACHE_FILE"

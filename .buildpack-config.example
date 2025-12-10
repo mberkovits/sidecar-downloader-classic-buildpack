@@ -1,4 +1,4 @@
-# GitHub JAR Downloader Buildpack Configuration
+# GitHub Build-from-Source Buildpack Configuration
 # Copy this file to your application root as .buildpack-config
 
 # GitHub repository owner (required)
@@ -7,12 +7,18 @@ GITHUB_REPO_OWNER="example-owner"
 # GitHub repository name (required)
 GITHUB_REPO_NAME="example-repo"
 
-# JAR filename to download (required)
-JAR_FILENAME="my-library.jar"
+# Branch to clone (optional, defaults to "main")
+BRANCH="main"
 
-# Release tag to download from (optional, defaults to "latest")
-# Use "latest" for the most recent release, or specify a tag like "v1.0.0"
-RELEASE_TAG="latest"
+# Build tool to use (optional, defaults to "auto")
+# Options: "auto", "maven", "gradle"
+# "auto" will detect based on presence of pom.xml or build.gradle
+BUILD_TOOL="auto"
+
+# JAR name pattern to find after build (optional)
+# If not specified, will find the first non-sources, non-javadoc JAR
+# Examples: "*-all.jar", "myapp-*.jar", "application.jar"
+JAR_NAME_PATTERN=""
 
 # Auto-start JAR as background process (optional, defaults to "false")
 # Set to "true" to automatically run the JAR in the background at startup
@@ -23,4 +29,3 @@ AUTO_START="false"
 # Only used if AUTO_START is "true"
 # Example: "-Xmx512m -Xms256m -Dserver.port=8081"
 JVM_OPTIONS=""
-

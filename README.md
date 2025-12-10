@@ -1,14 +1,17 @@
-# GitHub JAR Downloader Buildpack
+# GitHub Build-from-Source Buildpack
 
-A Heroku buildpack that downloads a Java JAR file from a GitHub repository's releases and makes it available in your application's runtime classpath.
+A Heroku buildpack that clones a Java project from a GitHub repository, builds it, and makes the compiled JAR file available in your application's runtime classpath.
 
 ## Features
 
-- 📦 Downloads JAR files from GitHub releases
+- 🔨 Clones and builds Java projects from GitHub
+- 🏗️ Supports Maven and Gradle (auto-detection)
+- 🔐 Works with private repositories
 - 🎯 Configurable via simple config file
-- 🚀 Supports latest release or specific release tags
-- 💾 Caches downloaded JARs for faster subsequent builds
-- ♻️ Automatically adds JAR to runtime classpath
+- 🌿 Clone any branch you specify
+- 💾 Caches build tools (Maven, Gradle, JDK) for faster builds
+- 🚀 Optionally runs JAR as background process
+- ♻️ Automatically adds built JAR to runtime classpath
 
 ## Usage
 
@@ -24,9 +27,7 @@ If your GitHub repository is private, you need to provide a GitHub Personal Acce
 heroku config:set GITHUB_TOKEN=ghp_your_token_here
 ```
 
-**Note:** For public repositories, the token is optional but recommended to avoid rate limiting.
-
-### 2. Create Configuration File
+**Note:** For public repositories, the token is optional but recommended.
 
 ### 2. Create Configuration File
 
@@ -39,34 +40,53 @@ GITHUB_REPO_OWNER="your-github-username"
 # GitHub repository name (required)
 GITHUB_REPO_NAME="your-repo-name"
 
-# JAR filename to download (required)
-JAR_FILENAME="your-library.jar"
+# Branch to clone (optional, defaults to "main")
+BRANCH="main"
 
-# Release tag to download from (optional, defaults to "latest")
-RELEASE_TAG="latest"
+# Build tool (optional, defaults to "auto")
+BUILD_TOOL="auto"
+
+# JAR name pattern (optional)
+JAR_NAME_PATTERN="*-all.jar"
+
+# Auto-start as background process (optional)
+AUTO_START="false"
+
+# JVM options if auto-starting (optional)
+JVM_OPTIONS="-Xmx512m"
 ```
 
-**Example:**
+**Example for a Gradle project:**
 
 ```bash
-GITHUB_REPO_OWNER="google"
-GITHUB_REPO_NAME="gson"
-JAR_FILENAME="gson-2.10.1.jar"
-RELEASE_TAG="gson-parent-2.10.1"
+GITHUB_REPO_OWNER="myorg"
+GITHUB_REPO_NAME="my-java-app"
+BRANCH="main"
+BUILD_TOOL="gradle"
+JAR_NAME_PATTERN="my-java-app-*.jar"
+AUTO_START="true"
+JVM_OPTIONS="-Xmx512m -Dserver.port=8081"
 ```
 
-### 3. Add Buildpack to Your Heroku App
+**Example for a Maven project:**
+
+```bash
+GITHUB_REPO_OWNER="myorg"
+GITHUB_REPO_NAME="my-maven-app"
+BRANCH="develop"
+BUILD_TOOL="maven"
+```
 
 ### 3. Add Buildpack to Your Heroku App
 
 ```bash
 # Using the buildpack from GitHub
-heroku buildpacks:add https://github.com/YOUR_USERNAME/classic-buildpack.git
+heroku buildpacks:add https://github.com/YOUR_USERNAME/classic-buildpack.git#build-from-source
 
 # Or set it as the primary buildpack
-heroku buildpacks:set https://github.com/YOUR_USERNAME/classic-buildpack.git
+heroku buildpacks:set https://github.com/YOUR_USERNAME/classic-buildpack.git#build-from-source
 
-# If you also need Java runtime, add it as well
+# If you also need Java runtime for your main app, add it as well
 heroku buildpacks:add heroku/java
 ```
 
@@ -82,8 +102,12 @@ git push heroku main
 2. **Compile Phase**: 
    - Reads the `GITHUB_TOKEN` from Heroku config vars (if set)
    - Reads configuration from `.buildpack-config`
-   - Downloads the specified JAR file from GitHub releases using authentication
-   - Caches the JAR for faster subsequent builds
+   - Installs GitHub CLI for authentication
+   - Clones the specified repository and branch
+   - Detects the build tool (Maven or Gradle) if set to "auto"
+   - Installs necessary build tools (cached for speed)
+   - Builds the project (skips tests for faster builds)
+   - Finds the compiled JAR file
    - Places the JAR in `vendor/jars/` directory
 3. **Runtime Phase**: The JAR is automatically added to the `CLASSPATH` environment variable
 
@@ -104,20 +128,44 @@ For **private repositories**, you must provide a GitHub Personal Access Token:
    heroku config:set GITHUB_TOKEN=ghp_your_token_here
    ```
 
-For **public repositories**, authentication is optional but recommended to avoid GitHub API rate limits (60 requests/hour without auth vs 5000 with auth).
+For **public repositories**, authentication is optional but recommended.
 
 ## Configuration Options
 
-| Variable | Required | Description | Example |
-|----------|----------|-------------|---------|
-| `GITHUB_REPO_OWNER` | Yes | GitHub repository owner/organization | `apache` |
-| `GITHUB_REPO_NAME` | Yes | GitHub repository name | `commons-lang` |
-| `JAR_FILENAME` | Yes | Exact filename of the JAR in the release | `commons-lang3-3.12.0.jar` |
-| `RELEASE_TAG` | No | Release tag or "latest" (default: "latest") | `v3.12.0` or `latest` |
-| `AUTO_START` | No | Auto-start JAR as background process (default: "false") | `true` or `false` |
-| `JVM_OPTIONS` | No | JVM options when auto-starting (requires AUTO_START=true) | `-Xmx512m -Dport=8081` |
+| Variable | Required | Description | Default | Example |
+|----------|----------|-------------|---------|---------|
+| `GITHUB_REPO_OWNER` | Yes | GitHub repository owner/organization | - | `apache` |
+| `GITHUB_REPO_NAME` | Yes | GitHub repository name | - | `commons-lang` |
+| `BRANCH` | No | Branch to clone | `main` | `develop`, `feature/new-api` |
+| `BUILD_TOOL` | No | Build tool to use | `auto` | `maven`, `gradle`, `auto` |
+| `JAR_NAME_PATTERN` | No | Pattern to find JAR after build | (first JAR) | `*-all.jar`, `myapp-*.jar` |
+| `AUTO_START` | No | Auto-start JAR as background process | `false` | `true` or `false` |
+| `JVM_OPTIONS` | No | JVM options when auto-starting | - | `-Xmx512m -Dport=8081` |
 
-## Running the Downloaded JAR
+## Build Tool Detection
+
+When `BUILD_TOOL="auto"` (the default):
+- Looks for `pom.xml` → Uses Maven
+- Looks for `build.gradle` or `build.gradle.kts` → Uses Gradle
+- If neither found → Fails with error
+
+## JAR Detection After Build
+
+After building, the buildpack looks for the compiled JAR:
+
+### Maven
+- Searches in `target/` directory
+- Excludes `*-sources.jar` and `*-javadoc.jar`
+- If `JAR_NAME_PATTERN` is set, matches that pattern
+- Otherwise, takes the first JAR found
+
+### Gradle
+- Searches in `build/libs/` directory
+- Excludes `*-plain.jar` and `*-sources.jar`
+- If `JAR_NAME_PATTERN` is set, matches that pattern
+- Otherwise, takes the first JAR found (usually the fat JAR)
+
+## Running the Built JAR
 
 ### Option 1: As a Library (Default)
 
@@ -138,7 +186,6 @@ Set `AUTO_START="true"` to automatically run the JAR in the background:
 # .buildpack-config
 GITHUB_REPO_OWNER="myorg"
 GITHUB_REPO_NAME="myrepo"
-JAR_FILENAME="http-server-app-1.0.0.jar"
 AUTO_START="true"
 JVM_OPTIONS="-Xmx512m -Dserver.port=8081"
 ```
@@ -151,7 +198,7 @@ Create a `Procfile` to run the JAR as a separate worker process:
 
 ```
 web: <your-main-app-command>
-worker: java -jar $HOME/vendor/jars/your-app.jar
+worker: java -jar $HOME/vendor/jars/*.jar
 ```
 
 Then scale:
@@ -164,55 +211,75 @@ heroku ps:scale worker=1
 Run the JAR as your main web process:
 
 ```
-web: java -jar $HOME/vendor/jars/your-app.jar
+web: java -jar $HOME/vendor/jars/*.jar
 ```
 
 ## JAR Location at Runtime
 
-The downloaded JAR will be available at:
+The built JAR will be available at:
 - File path: `$HOME/vendor/jars/YOUR_JAR_FILENAME.jar`
 - Automatically included in `$CLASSPATH`
 
 ## Caching
 
-The buildpack caches downloaded JARs to speed up subsequent builds. The cache is invalidated when:
-- The release tag changes
-- A new version is released (when using "latest")
+The buildpack caches the following to speed up subsequent builds:
+- JDK (OpenJDK 11)
+- Maven
+- Gradle
+- GitHub CLI
 
-## Finding the Correct JAR Filename
+The repository is cloned fresh on each build to ensure you get the latest code from the branch.
 
-To find the correct JAR filename:
+## Build Process
 
-1. Go to your GitHub repository releases page: `https://github.com/OWNER/REPO/releases`
-2. Find the release you want to use
-3. Look at the "Assets" section
-4. Copy the exact filename of the JAR file you want to download
+### Maven Projects
+Runs: `mvn clean package -DskipTests`
+- Skips tests for faster builds
+- Creates JAR in `target/` directory
+
+### Gradle Projects
+Runs: `./gradlew clean build -x test` (or `gradle` if wrapper not available)
+- Skips tests for faster builds
+- Creates JAR in `build/libs/` directory
 
 ## Examples
 
-### Example 1: Using Latest Release
+### Example 1: Build Gradle Project from Main Branch
 
 ```bash
-GITHUB_REPO_OWNER="FasterXML"
-GITHUB_REPO_NAME="jackson-core"
-JAR_FILENAME="jackson-core-2.16.0.jar"
-RELEASE_TAG="latest"
+GITHUB_REPO_OWNER="mycompany"
+GITHUB_REPO_NAME="backend-service"
+BRANCH="main"
+BUILD_TOOL="gradle"
+AUTO_START="true"
+JVM_OPTIONS="-Xmx768m"
 ```
 
-### Example 2: Using Specific Release Tag
+### Example 2: Build Maven Project from Develop Branch
 
 ```bash
-GITHUB_REPO_OWNER="junit-team"
-GITHUB_REPO_NAME="junit5"
-JAR_FILENAME="junit-jupiter-api-5.10.1.jar"
-RELEASE_TAG="r5.10.1"
+GITHUB_REPO_OWNER="myteam"
+GITHUB_REPO_NAME="api-gateway"
+BRANCH="develop"
+BUILD_TOOL="maven"
+JAR_NAME_PATTERN="api-gateway-*.jar"
+AUTO_START="false"
+```
+
+### Example 3: Build with Auto-Detection (Public Repo)
+
+```bash
+GITHUB_REPO_OWNER="apache"
+GITHUB_REPO_NAME="commons-cli"
+BRANCH="master"
+BUILD_TOOL="auto"
 ```
 
 ## Troubleshooting
 
 ### Authentication Issues for Private Repositories
 
-**Error:** `404 Not Found` when trying to access a private repository
+**Error:** `fatal: could not read Username` or `403` when cloning
 
 **Solution:**
 1. Make sure you've set the `GITHUB_TOKEN` config var:
@@ -222,49 +289,90 @@ RELEASE_TAG="r5.10.1"
 2. Verify your token has the `repo` scope
 3. Check that the token hasn't expired
 
-### GitHub API Rate Limiting
+### Build Failures
 
-**Error:** `API rate limit exceeded`
+**Error:** `Build failed` during Maven or Gradle build
 
 **Solution:**
-Set a `GITHUB_TOKEN` to increase your rate limit from 60 to 5000 requests per hour:
+- Check the build logs for specific errors
+- Ensure the project builds successfully locally
+- Verify the branch name is correct
+- Check if the project has dependencies on external systems
+- Consider if tests are failing (they're skipped but some build configs still run them)
+
+### JAR Not Found After Build
+
+**Error:** `Could not find built JAR file`
+
+**Solution:**
+1. Check if the build actually produces a JAR (some projects only produce WARs or other artifacts)
+2. Specify `JAR_NAME_PATTERN` to match your specific JAR name
+3. Look at the "Available JARs" list in the build output
+
+### Build Tool Not Detected
+
+**Error:** `Could not detect build tool`
+
+**Solution:**
+Set `BUILD_TOOL` explicitly in `.buildpack-config`:
 ```bash
-heroku config:set GITHUB_TOKEN=ghp_your_token_here
+BUILD_TOOL="maven"  # or "gradle"
 ```
 
-### JAR file not found in release
+### Java Version Issues
 
-**Error:** `Could not find JAR file 'xxx.jar' in latest release`
+The buildpack installs OpenJDK 11 by default. If your project requires a different Java version:
+- Consider modifying the buildpack or using the official Heroku Java buildpack as a base
+- Or ensure your project is compatible with Java 11
 
-**Solution:** 
-- Double-check the exact filename in the GitHub release
-- Verify the release actually contains the JAR file as an asset
-- For private repos, ensure `GITHUB_TOKEN` is set
-- Check the buildpack logs for available assets
+## Advanced: Multiple Repositories
+
+To build JARs from multiple repositories, you can:
+1. Use multiple buildpacks (if Heroku supports it for your stack)
+2. Modify the config to support arrays
+3. Or create separate builds and combine them
 
 ## Development
 
 ### Testing Locally
 
-You can test the buildpack locally using Docker:
+You can test the buildpack locally:
 
 ```bash
-# Create a test app
+# Create a test app directory
 mkdir test-app
 cd test-app
 
 # Create .buildpack-config
 cat > .buildpack-config <<EOF
-GITHUB_REPO_OWNER="google"
-GITHUB_REPO_NAME="gson"
-JAR_FILENAME="gson-2.10.1.jar"
-RELEASE_TAG="latest"
+GITHUB_REPO_OWNER="your-org"
+GITHUB_REPO_NAME="your-repo"
+BRANCH="main"
+BUILD_TOOL="gradle"
 EOF
 
 # Run buildpack
 /path/to/classic-buildpack/bin/detect .
 /path/to/classic-buildpack/bin/compile . /tmp/cache /tmp/env
 ```
+
+## Comparison: Release vs Build-from-Source
+
+This buildpack has two versions:
+
+### Main Branch: Download from Release
+- ✅ Faster (no build time)
+- ✅ Less dependencies
+- ✅ Consistent artifacts
+- ❌ Requires manual release creation
+- ❌ Can't use unreleased code
+
+### Build-from-Source Branch: Clone and Build
+- ✅ Always uses latest code from branch
+- ✅ No need to create releases
+- ✅ Can build from any branch
+- ❌ Slower (build time)
+- ❌ Requires build tools
 
 ## License
 
@@ -273,4 +381,3 @@ MIT
 ## Contributing
 
 Pull requests are welcome! Please feel free to submit issues and enhancement requests.
-

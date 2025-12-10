@@ -10,12 +10,13 @@ ENV_DIR=$3
 CONFIG_FILE="$BUILD_DIR/.buildpack-config"
 VENDOR_DIR="$BUILD_DIR/vendor"
 JAR_DIR="$VENDOR_DIR/jars"
+CLONE_DIR="$BUILD_DIR/.build-temp"
 
 indent() {
   sed -u 's/^/       /'
 }
 
-echo "-----> GitHub JAR Downloader Buildpack"
+echo "-----> GitHub Build-from-Source Buildpack"
 
 # Read GITHUB_TOKEN from environment if available
 if [ -d "$ENV_DIR" ] && [ -f "$ENV_DIR/GITHUB_TOKEN" ]; then
@@ -39,182 +40,215 @@ if [ -z "$GITHUB_REPO_OWNER" ] || [ -z "$GITHUB_REPO_NAME" ]; then
   exit 1
 fi
 
-if [ -z "$JAR_FILENAME" ]; then
-  echo "ERROR: JAR_FILENAME must be set in .buildpack-config" | indent
-  exit 1
-fi
-
-# Set default release tag to 'latest' if not specified
-RELEASE_TAG=${RELEASE_TAG:-"latest"}
+# Set defaults
+BRANCH=${BRANCH:-"main"}
+BUILD_TOOL=${BUILD_TOOL:-"auto"}
 
 echo "Repository: $GITHUB_REPO_OWNER/$GITHUB_REPO_NAME" | indent
-echo "Release Tag: $RELEASE_TAG" | indent
-echo "JAR Filename: $JAR_FILENAME" | indent
+echo "Branch: $BRANCH" | indent
+echo "Build Tool: $BUILD_TOOL" | indent
 
-# Create vendor directory
+# Create directories
 mkdir -p "$JAR_DIR"
+mkdir -p "$CLONE_DIR"
 
-# Prepare authentication headers if token is available
-if [ -n "$GITHUB_TOKEN" ]; then
-  AUTH_HEADER="Authorization: token $GITHUB_TOKEN"
-  CURL_AUTH="-H \"$AUTH_HEADER\""
+# Install GitHub CLI if needed (for private repos or easier auth)
+echo "-----> Installing GitHub CLI"
+GH_VERSION="2.40.0"
+GH_CACHE="$CACHE_DIR/gh-cli"
+
+if [ -f "$GH_CACHE/bin/gh" ]; then
+  echo "Using cached GitHub CLI" | indent
+  export PATH="$GH_CACHE/bin:$PATH"
 else
-  CURL_AUTH=""
-fi
-
-# Determine download URL and asset ID
-if [ "$RELEASE_TAG" == "latest" ]; then
-  echo "-----> Fetching latest release information"
-  API_URL="https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/latest"
-
-  # Get release info with authentication if available
-  if [ -n "$GITHUB_TOKEN" ]; then
-    RELEASE_INFO=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$API_URL")
+  echo "Downloading GitHub CLI v$GH_VERSION" | indent
+  GH_URL="https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
+  
+  curl -sL "$GH_URL" | tar -xz -C /tmp
+  mkdir -p "$GH_CACHE"
+  cp -r /tmp/gh_${GH_VERSION}_linux_amd64/* "$GH_CACHE/"
+  export PATH="$GH_CACHE/bin:$PATH"
+  
+  if command -v gh &> /dev/null; then
+    echo "GitHub CLI installed successfully" | indent
   else
-    RELEASE_INFO=$(curl -s "$API_URL")
-  fi
-
-  ACTUAL_TAG=$(echo "$RELEASE_INFO" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
-  echo "Latest release tag: $ACTUAL_TAG" | indent
-else
-  echo "-----> Fetching release information for tag: $RELEASE_TAG"
-  API_URL="https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/tags/$RELEASE_TAG"
-
-  # Get release info with authentication if available
-  if [ -n "$GITHUB_TOKEN" ]; then
-    RELEASE_INFO=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$API_URL")
-  else
-    RELEASE_INFO=$(curl -s "$API_URL")
-  fi
-
-  ACTUAL_TAG="$RELEASE_TAG"
-fi
-
-# Check if we got valid release info
-if echo "$RELEASE_INFO" | grep -q '"message": "Not Found"'; then
-  echo "ERROR: Release not found. Please check your GITHUB_TOKEN has access to the repository." | indent
-  exit 1
-fi
-
-# Extract asset information for the JAR file
-# Need to find the asset ID which comes before the name in the JSON
-# Use a more robust method to parse the JSON
-
-# First check if the JAR file exists in the release
-if ! echo "$RELEASE_INFO" | grep -q "\"name\": \"$JAR_FILENAME\""; then
-  echo "ERROR: Could not find JAR file '$JAR_FILENAME' in release" | indent
-  echo "Available assets:" | indent
-  echo "$RELEASE_INFO" | grep '"name":' | sed 's/.*"name": "\([^"]*\)".*/\1/' | indent
-  exit 1
-fi
-
-# Extract the asset ID - the id field comes before the name field in each asset object
-# We'll use a more robust approach: find all assets and match by name
-ASSET_ID=$(echo "$RELEASE_INFO" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    assets = data.get('assets', [])
-    for asset in assets:
-        if asset.get('name') == '$JAR_FILENAME':
-            print(asset.get('id', ''))
-            break
-except:
-    pass
-")
-
-# Fallback to grep/sed if python parsing fails
-if [ -z "$ASSET_ID" ]; then
-  echo "Trying alternative parsing method..." | indent
-  # Split on assets, find the one with our filename, extract its ID
-  ASSET_ID=$(echo "$RELEASE_INFO" | awk '
-    /"id":/ { id = $0; gsub(/[^0-9]/, "", id) }
-    /"name": "'"$JAR_FILENAME"'"/ { print id; exit }
-  ')
-fi
-
-if [ -z "$ASSET_ID" ]; then
-  echo "ERROR: Could not extract asset ID for '$JAR_FILENAME'" | indent
-  echo "Available assets:" | indent
-  echo "$RELEASE_INFO" | grep '"name":' | sed 's/.*"name": "\([^"]*\)".*/\1/' | indent
-  exit 1
-fi
-
-# For private repos, we need to use the API endpoint with Accept header
-# For public repos, the direct URL works, but API endpoint works for both
-DOWNLOAD_URL="https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/assets/$ASSET_ID"
-
-echo "Asset ID: $ASSET_ID" | indent
-
-# Check cache
-CACHE_FILE="$CACHE_DIR/$JAR_FILENAME"
-CACHE_TAG_FILE="$CACHE_DIR/release_tag"
-
-if [ -f "$CACHE_FILE" ] && [ -f "$CACHE_TAG_FILE" ]; then
-  CACHED_TAG=$(cat "$CACHE_TAG_FILE")
-  if [ "$RELEASE_TAG" == "latest" ]; then
-    COMPARE_TAG="$ACTUAL_TAG"
-  else
-    COMPARE_TAG="$RELEASE_TAG"
-  fi
-
-  if [ "$CACHED_TAG" == "$COMPARE_TAG" ]; then
-    echo "-----> Using cached JAR file" | indent
-    cp "$CACHE_FILE" "$JAR_DIR/$JAR_FILENAME"
-    echo "Copied from cache" | indent
-  else
-    echo "-----> Cache invalidated (tag changed: $CACHED_TAG -> $COMPARE_TAG)" | indent
-    DOWNLOAD_JAR=true
-  fi
-else
-  DOWNLOAD_JAR=true
-fi
-
-# Download JAR if needed
-if [ "$DOWNLOAD_JAR" == "true" ]; then
-  echo "-----> Downloading JAR file"
-
-  # Download using GitHub API (works for both public and private repos)
-  # The Accept header tells GitHub to return the asset binary instead of JSON
-  if [ -n "$GITHUB_TOKEN" ]; then
-    curl -L -f \
-      -H "Authorization: token $GITHUB_TOKEN" \
-      -H "Accept: application/octet-stream" \
-      -o "$JAR_DIR/$JAR_FILENAME" \
-      "$DOWNLOAD_URL"
-  else
-    curl -L -f \
-      -H "Accept: application/octet-stream" \
-      -o "$JAR_DIR/$JAR_FILENAME" \
-      "$DOWNLOAD_URL"
-  fi
-
-  if [ $? -eq 0 ]; then
-    echo "Downloaded successfully" | indent
-
-    # Update cache
-    mkdir -p "$CACHE_DIR"
-    cp "$JAR_DIR/$JAR_FILENAME" "$CACHE_FILE"
-    if [ "$RELEASE_TAG" == "latest" ]; then
-      echo "$ACTUAL_TAG" > "$CACHE_TAG_FILE"
-    else
-      echo "$RELEASE_TAG" > "$CACHE_TAG_FILE"
-    fi
-    echo "Cached for future builds" | indent
-  else
-    echo "ERROR: Failed to download JAR file from $DOWNLOAD_URL" | indent
+    echo "ERROR: Failed to install GitHub CLI" | indent
     exit 1
   fi
 fi
 
-# Verify the JAR file
-if [ -f "$JAR_DIR/$JAR_FILENAME" ]; then
-  JAR_SIZE=$(du -h "$JAR_DIR/$JAR_FILENAME" | cut -f1)
-  echo "-----> JAR file ready: $JAR_FILENAME ($JAR_SIZE)" | indent
+# Set up git authentication
+if [ -n "$GITHUB_TOKEN" ]; then
+  git config --global credential.helper store
+  echo "https://$GITHUB_TOKEN:x-oauth-basic@github.com" > ~/.git-credentials
+fi
+
+# Clone the repository
+echo "-----> Cloning repository"
+REPO_URL="https://github.com/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME.git"
+
+if [ -n "$GITHUB_TOKEN" ]; then
+  REPO_URL="https://$GITHUB_TOKEN@github.com/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME.git"
+fi
+
+if git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$CLONE_DIR/repo" 2>&1 | indent; then
+  echo "Repository cloned successfully" | indent
 else
-  echo "ERROR: JAR file not found after download" | indent
+  echo "ERROR: Failed to clone repository" | indent
   exit 1
 fi
+
+cd "$CLONE_DIR/repo"
+
+# Detect build tool if set to auto
+if [ "$BUILD_TOOL" == "auto" ]; then
+  if [ -f "pom.xml" ]; then
+    BUILD_TOOL="maven"
+    echo "Detected Maven project" | indent
+  elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+    BUILD_TOOL="gradle"
+    echo "Detected Gradle project" | indent
+  else
+    echo "ERROR: Could not detect build tool. Please set BUILD_TOOL in .buildpack-config" | indent
+    exit 1
+  fi
+fi
+
+# Install Java if not present
+echo "-----> Setting up Java"
+if ! command -v java &> /dev/null; then
+  echo "Installing Java..." | indent
+  JAVA_VERSION="11"
+  JAVA_CACHE="$CACHE_DIR/jdk"
+  
+  if [ -d "$JAVA_CACHE" ]; then
+    echo "Using cached JDK" | indent
+    export JAVA_HOME="$JAVA_CACHE"
+    export PATH="$JAVA_HOME/bin:$PATH"
+  else
+    echo "Downloading OpenJDK $JAVA_VERSION" | indent
+    JDK_URL="https://github.com/adoptium/temurin11-binaries/releases/download/jdk-11.0.21%2B9/OpenJDK11U-jdk_x64_linux_hotspot_11.0.21_9.tar.gz"
+    
+    curl -sL "$JDK_URL" | tar -xz -C "$CACHE_DIR"
+    mv "$CACHE_DIR/jdk-11.0.21+9" "$JAVA_CACHE"
+    export JAVA_HOME="$JAVA_CACHE"
+    export PATH="$JAVA_HOME/bin:$PATH"
+    
+    echo "Java installed successfully" | indent
+  fi
+else
+  echo "Using existing Java installation" | indent
+  java -version 2>&1 | indent
+fi
+
+# Build the project
+echo "-----> Building project with $BUILD_TOOL"
+
+case "$BUILD_TOOL" in
+  maven)
+    # Install Maven if not present
+    if ! command -v mvn &> /dev/null; then
+      echo "Installing Maven..." | indent
+      MVN_VERSION="3.9.5"
+      MVN_CACHE="$CACHE_DIR/maven"
+      
+      if [ -d "$MVN_CACHE" ]; then
+        echo "Using cached Maven" | indent
+        export PATH="$MVN_CACHE/bin:$PATH"
+      else
+        MVN_URL="https://archive.apache.org/dist/maven/maven-3/${MVN_VERSION}/binaries/apache-maven-${MVN_VERSION}-bin.tar.gz"
+        curl -sL "$MVN_URL" | tar -xz -C "$CACHE_DIR"
+        mv "$CACHE_DIR/apache-maven-${MVN_VERSION}" "$MVN_CACHE"
+        export PATH="$MVN_CACHE/bin:$PATH"
+        echo "Maven installed successfully" | indent
+      fi
+    fi
+    
+    echo "Running: mvn clean package -DskipTests" | indent
+    if mvn clean package -DskipTests 2>&1 | indent; then
+      echo "Build successful" | indent
+      
+      # Find the built JAR
+      if [ -n "$JAR_NAME_PATTERN" ]; then
+        BUILT_JAR=$(find target -name "$JAR_NAME_PATTERN" -type f | head -n 1)
+      else
+        BUILT_JAR=$(find target -name "*.jar" ! -name "*-sources.jar" ! -name "*-javadoc.jar" -type f | head -n 1)
+      fi
+    else
+      echo "ERROR: Maven build failed" | indent
+      exit 1
+    fi
+    ;;
+    
+  gradle)
+    # Use Gradle wrapper if available
+    if [ -f "gradlew" ]; then
+      chmod +x gradlew
+      GRADLE_CMD="./gradlew"
+    elif command -v gradle &> /dev/null; then
+      GRADLE_CMD="gradle"
+    else
+      echo "Installing Gradle..." | indent
+      GRADLE_VERSION="8.5"
+      GRADLE_CACHE="$CACHE_DIR/gradle"
+      
+      if [ -d "$GRADLE_CACHE" ]; then
+        echo "Using cached Gradle" | indent
+        export PATH="$GRADLE_CACHE/bin:$PATH"
+      else
+        GRADLE_URL="https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+        curl -sL "$GRADLE_URL" -o /tmp/gradle.zip
+        unzip -q /tmp/gradle.zip -d "$CACHE_DIR"
+        mv "$CACHE_DIR/gradle-${GRADLE_VERSION}" "$GRADLE_CACHE"
+        export PATH="$GRADLE_CACHE/bin:$PATH"
+        echo "Gradle installed successfully" | indent
+      fi
+      GRADLE_CMD="gradle"
+    fi
+    
+    echo "Running: $GRADLE_CMD clean build -x test" | indent
+    if $GRADLE_CMD clean build -x test 2>&1 | indent; then
+      echo "Build successful" | indent
+      
+      # Find the built JAR
+      if [ -n "$JAR_NAME_PATTERN" ]; then
+        BUILT_JAR=$(find build/libs -name "$JAR_NAME_PATTERN" -type f | head -n 1)
+      else
+        BUILT_JAR=$(find build/libs -name "*.jar" ! -name "*-plain.jar" ! -name "*-sources.jar" -type f | head -n 1)
+      fi
+    else
+      echo "ERROR: Gradle build failed" | indent
+      exit 1
+    fi
+    ;;
+    
+  *)
+    echo "ERROR: Unsupported build tool: $BUILD_TOOL" | indent
+    echo "Supported tools: maven, gradle, auto" | indent
+    exit 1
+    ;;
+esac
+
+# Verify JAR was built
+if [ -z "$BUILT_JAR" ] || [ ! -f "$BUILT_JAR" ]; then
+  echo "ERROR: Could not find built JAR file" | indent
+  echo "Available JARs:" | indent
+  find . -name "*.jar" -type f | indent
+  exit 1
+fi
+
+# Extract JAR filename
+JAR_FILENAME=$(basename "$BUILT_JAR")
+echo "Found JAR: $JAR_FILENAME" | indent
+
+# Copy JAR to vendor directory
+cp "$BUILT_JAR" "$JAR_DIR/$JAR_FILENAME"
+JAR_SIZE=$(du -h "$JAR_DIR/$JAR_FILENAME" | cut -f1)
+echo "-----> JAR file ready: $JAR_FILENAME ($JAR_SIZE)" | indent
+
+# Clean up clone directory
+cd "$BUILD_DIR"
+rm -rf "$CLONE_DIR"
 
 # Create profile.d script to add JAR to classpath and optionally start it
 PROFILE_DIR="$BUILD_DIR/.profile.d"
@@ -259,4 +293,3 @@ fi
 echo "Location: \$HOME/vendor/jars/$JAR_FILENAME" | indent
 
 echo "-----> Build complete!"
-

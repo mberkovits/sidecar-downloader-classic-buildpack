@@ -12,7 +12,23 @@ A Heroku buildpack that downloads a Java JAR file from a GitHub repository's rel
 
 ## Usage
 
-### 1. Create Configuration File
+### 1. Set GitHub Token (Required for Private Repositories)
+
+If your GitHub repository is private, you need to provide a GitHub Personal Access Token:
+
+```bash
+# Create a GitHub token at: https://github.com/settings/tokens
+# The token needs "repo" scope to access private repositories
+
+# Set it as a Heroku config variable
+heroku config:set GITHUB_TOKEN=ghp_your_token_here
+```
+
+**Note:** For public repositories, the token is optional but recommended to avoid rate limiting.
+
+### 2. Create Configuration File
+
+### 2. Create Configuration File
 
 In your application root, create a `.buildpack-config` file:
 
@@ -39,7 +55,9 @@ JAR_FILENAME="gson-2.10.1.jar"
 RELEASE_TAG="gson-parent-2.10.1"
 ```
 
-### 2. Add Buildpack to Your Heroku App
+### 3. Add Buildpack to Your Heroku App
+
+### 3. Add Buildpack to Your Heroku App
 
 ```bash
 # Using the buildpack from GitHub
@@ -52,7 +70,7 @@ heroku buildpacks:set https://github.com/YOUR_USERNAME/classic-buildpack.git
 heroku buildpacks:add heroku/java
 ```
 
-### 3. Deploy
+### 4. Deploy
 
 ```bash
 git push heroku main
@@ -62,11 +80,31 @@ git push heroku main
 
 1. **Detection Phase**: The buildpack checks for the presence of `.buildpack-config` in your app root
 2. **Compile Phase**: 
+   - Reads the `GITHUB_TOKEN` from Heroku config vars (if set)
    - Reads configuration from `.buildpack-config`
-   - Downloads the specified JAR file from GitHub releases
+   - Downloads the specified JAR file from GitHub releases using authentication
    - Caches the JAR for faster subsequent builds
    - Places the JAR in `vendor/jars/` directory
 3. **Runtime Phase**: The JAR is automatically added to the `CLASSPATH` environment variable
+
+## Authentication
+
+### GitHub Personal Access Token
+
+For **private repositories**, you must provide a GitHub Personal Access Token:
+
+1. **Create a token**: Go to https://github.com/settings/tokens/new
+   - Give it a descriptive name (e.g., "Heroku Buildpack")
+   - Select the `repo` scope (Full control of private repositories)
+   - Click "Generate token"
+   - Copy the token (it starts with `ghp_`)
+
+2. **Set it in Heroku**:
+   ```bash
+   heroku config:set GITHUB_TOKEN=ghp_your_token_here
+   ```
+
+For **public repositories**, authentication is optional but recommended to avoid GitHub API rate limits (60 requests/hour without auth vs 5000 with auth).
 
 ## Configuration Options
 
@@ -120,6 +158,28 @@ RELEASE_TAG="r5.10.1"
 
 ## Troubleshooting
 
+### Authentication Issues for Private Repositories
+
+**Error:** `404 Not Found` when trying to access a private repository
+
+**Solution:**
+1. Make sure you've set the `GITHUB_TOKEN` config var:
+   ```bash
+   heroku config:set GITHUB_TOKEN=ghp_your_token_here
+   ```
+2. Verify your token has the `repo` scope
+3. Check that the token hasn't expired
+
+### GitHub API Rate Limiting
+
+**Error:** `API rate limit exceeded`
+
+**Solution:**
+Set a `GITHUB_TOKEN` to increase your rate limit from 60 to 5000 requests per hour:
+```bash
+heroku config:set GITHUB_TOKEN=ghp_your_token_here
+```
+
 ### JAR file not found in release
 
 **Error:** `Could not find JAR file 'xxx.jar' in latest release`
@@ -127,18 +187,8 @@ RELEASE_TAG="r5.10.1"
 **Solution:** 
 - Double-check the exact filename in the GitHub release
 - Verify the release actually contains the JAR file as an asset
+- For private repos, ensure `GITHUB_TOKEN` is set
 - Check the buildpack logs for available assets
-
-### Authentication Issues
-
-If downloading from a private repository:
-
-```bash
-# Set GitHub token as Heroku config var
-heroku config:set GITHUB_TOKEN=your_personal_access_token
-```
-
-Then modify the `bin/compile` script to use authentication (add `-H "Authorization: token $GITHUB_TOKEN"` to curl commands).
 
 ## Development
 

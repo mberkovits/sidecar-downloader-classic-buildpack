@@ -17,6 +17,12 @@ indent() {
 
 echo "-----> GitHub JAR Downloader Buildpack"
 
+# Read GITHUB_TOKEN from environment if available
+if [ -d "$ENV_DIR" ] && [ -f "$ENV_DIR/GITHUB_TOKEN" ]; then
+  GITHUB_TOKEN=$(cat "$ENV_DIR/GITHUB_TOKEN")
+  echo "Using GitHub token for authentication" | indent
+fi
+
 # Check if config file exists
 if [ ! -f "$CONFIG_FILE" ]; then
   echo "ERROR: .buildpack-config file not found!" | indent
@@ -48,13 +54,25 @@ echo "JAR Filename: $JAR_FILENAME" | indent
 # Create vendor directory
 mkdir -p "$JAR_DIR"
 
+# Prepare authentication headers if token is available
+if [ -n "$GITHUB_TOKEN" ]; then
+  AUTH_HEADER="Authorization: token $GITHUB_TOKEN"
+  CURL_AUTH="-H \"$AUTH_HEADER\""
+else
+  CURL_AUTH=""
+fi
+
 # Determine download URL
 if [ "$RELEASE_TAG" == "latest" ]; then
   echo "-----> Fetching latest release information"
   API_URL="https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/latest"
   
-  # Get release info
-  RELEASE_INFO=$(curl -s "$API_URL")
+  # Get release info with authentication if available
+  if [ -n "$GITHUB_TOKEN" ]; then
+    RELEASE_INFO=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$API_URL")
+  else
+    RELEASE_INFO=$(curl -s "$API_URL")
+  fi
   
   # Extract download URL for the JAR file
   DOWNLOAD_URL=$(echo "$RELEASE_INFO" | grep -o "https://github.com/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/download/[^\"]*/$JAR_FILENAME" | head -n 1)
@@ -102,7 +120,14 @@ fi
 if [ "$DOWNLOAD_JAR" == "true" ]; then
   echo "-----> Downloading JAR file"
   
-  if curl -L -f -o "$JAR_DIR/$JAR_FILENAME" "$DOWNLOAD_URL"; then
+  # Download with authentication if token is available
+  if [ -n "$GITHUB_TOKEN" ]; then
+    DOWNLOAD_CMD="curl -L -f -H \"Authorization: token $GITHUB_TOKEN\" -o \"$JAR_DIR/$JAR_FILENAME\" \"$DOWNLOAD_URL\""
+  else
+    DOWNLOAD_CMD="curl -L -f -o \"$JAR_DIR/$JAR_FILENAME\" \"$DOWNLOAD_URL\""
+  fi
+  
+  if eval $DOWNLOAD_CMD; then
     echo "Downloaded successfully" | indent
     
     # Update cache

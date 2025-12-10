@@ -77,24 +77,22 @@ else
   fi
 fi
 
-# Set up git authentication
+# Set up GitHub CLI authentication
 if [ -n "$GITHUB_TOKEN" ]; then
-  git config --global credential.helper store
-  echo "https://$GITHUB_TOKEN:x-oauth-basic@github.com" > ~/.git-credentials
+  export GH_TOKEN="$GITHUB_TOKEN"
+  echo "Authenticated with GitHub CLI" | indent
 fi
 
-# Clone the repository
+# Clone the repository using GitHub CLI
 echo "-----> Cloning repository"
-REPO_URL="https://github.com/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME.git"
+REPO_NAME="$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME"
 
-if [ -n "$GITHUB_TOKEN" ]; then
-  REPO_URL="https://$GITHUB_TOKEN@github.com/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME.git"
-fi
-
-if git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$CLONE_DIR/repo" 2>&1 | indent; then
+# Use gh repo clone which handles authentication automatically
+if gh repo clone "$REPO_NAME" "$CLONE_DIR/repo" -- --depth 1 --branch "$BRANCH" 2>&1 | indent; then
   echo "Repository cloned successfully" | indent
 else
   echo "ERROR: Failed to clone repository" | indent
+  echo "Make sure GITHUB_TOKEN is set for private repositories" | indent
   exit 1
 fi
 

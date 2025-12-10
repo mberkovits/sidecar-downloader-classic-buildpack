@@ -216,16 +216,46 @@ else
   exit 1
 fi
 
-# Create profile.d script to add JAR to classpath
+# Create profile.d script to add JAR to classpath and optionally start it
 PROFILE_DIR="$BUILD_DIR/.profile.d"
 mkdir -p "$PROFILE_DIR"
 
-cat > "$PROFILE_DIR/github-jar-loader.sh" <<'EOF'
+# Set default for AUTO_START if not specified
+AUTO_START=${AUTO_START:-"false"}
+
+if [ "$AUTO_START" == "true" ]; then
+  echo "-----> JAR will auto-start as background process at runtime" | indent
+  
+  cat > "$PROFILE_DIR/github-jar-loader.sh" <<EOF
+# Add downloaded JAR to classpath
+export CLASSPATH="\$HOME/vendor/jars/*:\$CLASSPATH"
+
+# Start JAR in background if not already running
+if [ ! -f /tmp/github-jar.pid ] || ! ps -p \$(cat /tmp/github-jar.pid 2>/dev/null) > /dev/null 2>&1; then
+  echo "Starting background JAR: $JAR_FILENAME"
+  nohup java $JVM_OPTIONS -jar "\$HOME/vendor/jars/$JAR_FILENAME" > "\$HOME/logs/github-jar.log" 2>&1 &
+  echo \$! > /tmp/github-jar.pid
+  echo "Background JAR started with PID \$(cat /tmp/github-jar.pid)"
+else
+  echo "Background JAR already running with PID \$(cat /tmp/github-jar.pid)"
+fi
+EOF
+
+  # Create logs directory
+  mkdir -p "$BUILD_DIR/logs"
+  
+  echo "JAR will start automatically in background" | indent
+  echo "Logs: \$HOME/logs/github-jar.log" | indent
+  echo "PID file: /tmp/github-jar.pid" | indent
+else
+  cat > "$PROFILE_DIR/github-jar-loader.sh" <<'EOF'
 # Add downloaded JAR to classpath
 export CLASSPATH="$HOME/vendor/jars/*:$CLASSPATH"
 EOF
+  
+  echo "-----> JAR will be available in classpath at runtime" | indent
+fi
 
-echo "-----> JAR will be available in classpath at runtime" | indent
 echo "Location: \$HOME/vendor/jars/$JAR_FILENAME" | indent
 
 echo "-----> Build complete!"

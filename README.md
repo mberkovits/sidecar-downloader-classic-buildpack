@@ -114,6 +114,58 @@ For **public repositories**, authentication is optional but recommended to avoid
 | `GITHUB_REPO_NAME` | Yes | GitHub repository name | `commons-lang` |
 | `JAR_FILENAME` | Yes | Exact filename of the JAR in the release | `commons-lang3-3.12.0.jar` |
 | `RELEASE_TAG` | No | Release tag or "latest" (default: "latest") | `v3.12.0` or `latest` |
+| `AUTO_START` | No | Auto-start JAR as background process (default: "false") | `true` or `false` |
+| `JVM_OPTIONS` | No | JVM options when auto-starting (requires AUTO_START=true) | `-Xmx512m -Dport=8081` |
+
+## Running the Downloaded JAR
+
+### Option 1: As a Library (Default)
+
+By default, the JAR is added to `CLASSPATH` and available for your application to import:
+
+```bash
+# .buildpack-config
+AUTO_START="false"
+```
+
+Your application can then use classes from the JAR.
+
+### Option 2: Auto-Start as Background Process
+
+Set `AUTO_START="true"` to automatically run the JAR in the background:
+
+```bash
+# .buildpack-config
+GITHUB_REPO_OWNER="myorg"
+GITHUB_REPO_NAME="myrepo"
+JAR_FILENAME="http-server-app-1.0.0.jar"
+AUTO_START="true"
+JVM_OPTIONS="-Xmx512m -Dserver.port=8081"
+```
+
+The JAR will automatically start in the background when your dyno boots. Logs are written to `$HOME/logs/github-jar.log`.
+
+### Option 3: Worker Dyno
+
+Create a `Procfile` to run the JAR as a separate worker process:
+
+```
+web: <your-main-app-command>
+worker: java -jar $HOME/vendor/jars/your-app.jar
+```
+
+Then scale:
+```bash
+heroku ps:scale worker=1
+```
+
+### Option 4: Executable in Procfile
+
+Run the JAR as your main web process:
+
+```
+web: java -jar $HOME/vendor/jars/your-app.jar
+```
 
 ## JAR Location at Runtime
 

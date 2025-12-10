@@ -14,3 +14,13 @@ JAR_FILENAME="my-library.jar"
 # Use "latest" for the most recent release, or specify a tag like "v1.0.0"
 RELEASE_TAG="latest"
 
+# Auto-start JAR as background process (optional, defaults to "false")
+# Set to "true" to automatically run the JAR in the background at startup
+# Set to "false" to only add JAR to classpath without running it
+AUTO_START="false"
+
+# JVM options for auto-started JAR (optional)
+# Only used if AUTO_START is "true"
+# Example: "-Xmx512m -Xms256m -Dserver.port=8081"
+JVM_OPTIONS=""
+
